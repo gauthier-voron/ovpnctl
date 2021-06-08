@@ -1,0 +1,258 @@
+#!/usr/bin/perl -l
+
+use strict;
+use warnings;
+
+use Getopt::Long qw(GetOptionsFromArray);
+
+
+my $PROGNAME = 'ovpnctl';
+my $VERSION  = '0.1';
+my $AUTHOR   = 'Gauthier Voron';
+my $EMAIL    = 'gauthier.voron@mnesic.fr';
+
+my $CONFIG_PATH = '/etc/openvpn';
+my $CLIENT_CONFIG_PATH = $CONFIG_PATH . '/client';
+
+
+sub _fatal
+{
+    my ($msg) = @_;
+
+    printf(STDERR "%s: %s\n", $PROGNAME, $msg);
+    printf(STDERR "Please type '%s --help' for more information.\n", $0);
+
+    exit (1);
+}
+
+sub _get_configs
+{
+    my ($dh, $entry, @configs);
+
+    if (!opendir($dh, $CLIENT_CONFIG_PATH)) {
+	_fatal("cannot open directory '$CLIENT_CONFIG_PATH' : $!");
+    }
+
+    @configs = sort { $a cmp $b }
+               map { s/\.conf//; $_ }
+               grep { /\.conf$/ } readdir($dh);
+
+    closedir($dh);
+
+    return \@configs;
+}
+
+sub _is_active
+{
+    my ($config) = @_;
+    my (@command, $fh, $line, $astate, $active);
+
+    push(@command, 'systemctl', 'status');
+    push(@command, 'openvpn-client@' . $config . '.service');
+
+    if (!open($fh, '-|', @command)) {
+	_fatal("cannot run '" . join(' ', @command) . "' : $!");
+    }
+
+    $active = 0;
+
+    while (defined($line = <$fh>)) {
+	chomp($line);
+
+	if ($line =~ /^\s*Active: (.*)/) {
+	    $astate = $1;
+
+	    if ($astate =~ /^active \(running\)/) {
+		$active = 1;
+	    }
+
+	    last;
+	}
+    }
+
+    close($fh);
+
+    return $active;
+}
+
+
+sub list
+{
+    my ($configs, $config, $active, $symbol);
+
+    $configs = _get_configs();
+
+    foreach $config (@$configs) {
+	$active = _is_active($config);
+
+	if ($active) {
+	    $symbol = '*';
+	} else {
+	    $symbol = ' ';
+	}
+
+	printf("%s %s\n", $symbol, $config);
+    }
+}
+
+sub _start
+{
+    my ($config) = @_;
+    my (@command);
+
+    push(@command, 'systemctl', 'start');
+    push(@command, 'openvpn-client@' . $config . '.service');
+
+    if (system(@command) != 0) {
+	_fatal("failed to run '" . join(' ', @command) . "'");
+    }
+}
+
+sub _stop
+{
+    my ($config) = @_;
+    my (@command);
+
+    push(@command, 'systemctl', 'stop');
+    push(@command, 'openvpn-client@' . $config . '.service');
+
+    if (system(@command) != 0) {
+	_fatal("failed to run '" . join(' ', @command) . "'");
+    }
+}
+
+sub start
+{
+    my ($config) = @_;
+    my ($configs, $oconf, @command);
+
+    $configs = _get_configs();
+
+    if (!grep { $config eq $_ } @$configs) {
+	_fatal("unknown configuration '$config'");
+    }
+
+    foreach $oconf (@$configs) {
+	next if ($oconf eq $config);
+
+	if (_is_active($oconf)) {
+	    _stop($oconf);
+	}
+    }
+
+    _start($config);
+}
+
+sub stop
+{
+    my ($config) = @_;
+    my ($configs, @command);
+
+    $configs = _get_configs();
+
+    if (!grep { $config eq $_ } @$configs) {
+	_fatal("unknown configuration '$config'");
+    }
+
+    if (!_is_active($config)) {
+	_fatal("configuration is not active: '$config'");
+    }
+
+    _stop($config);
+}
+
+
+sub _usage
+{
+    return <<"EOF";
+Usage: $0 [-h | --help | -V | --version]  (1)
+       $0 [start | stop] <config>         (2)
+       $0 list                            (3)
+
+List, start or stop OpenVPN client configurations.
+
+(1) Print this message and exit with '-h' or '--help' or print version
+    information and exit with '-V' or '--version'.
+
+(2) Start or stop and OpenVPN configuration. Valid configurations are the ones
+    listed by (3). Only one configuration can be active at the same time. This
+    operation can require privileged access.
+
+(3) List OpenVPN configurations. If a configuration is active, it is prefixed
+    by a '*' symbol. This operation can require privileged access.
+EOF
+}
+
+sub _version
+{
+    return <<"EOF";
+$PROGNAME $VERSION
+$AUTHOR
+$EMAIL
+EOF
+}
+
+sub main
+{
+    my ($cmd, $config);
+
+    GetOptionsFromArray(
+	\@_,
+	'h|help'    => sub { printf("%s", _usage()); exit (0); },
+	'V|version' => sub { printf("%s", _version()); exit (0); }
+	);
+
+    if (scalar(@_) < 1) {
+	_fatal('missing command operand');
+    }
+
+    $cmd = shift(@_);
+
+    if ($cmd eq 'list') {
+	if (scalar(@_) > 0) {
+	    _fatal("unexpected operand: '" . shift(@_) . "'");
+	}
+
+	list();
+
+	return 0;
+    }
+
+    if ($cmd eq 'start') {
+	if (scalar(@_) < 1) {
+	    _fatal('missing config operand');
+	}
+
+	$config = shift(@_);
+
+    	if (scalar(@_) > 0) {
+	    _fatal("unexpected operand: '" . shift(@_) . "'");
+	}
+
+	start($config);
+
+	return 0;
+    }
+
+    if ($cmd eq 'stop') {
+	if (scalar(@_) < 1) {
+	    _fatal('missing config operand');
+	}
+
+	$config = shift(@_);
+
+    	if (scalar(@_) > 0) {
+	    _fatal("unexpected operand: '" . shift(@_) . "'");
+	}
+
+	stop($config);
+
+	return 0;
+    }
+
+    _fatal("unknown command: '$cmd'");
+}
+
+
+exit (main(@ARGV));
+__END__
